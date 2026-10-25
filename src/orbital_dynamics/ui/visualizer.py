@@ -10,10 +10,11 @@ from pyvistaqt import QtInteractor
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QWidget, QHBoxLayout, QVBoxLayout, QFormLayout,
     QLabel, QSlider, QDoubleSpinBox, QPushButton, QGroupBox, QMessageBox)
-from tudatpy.astro import element_conversion
+from orbital_dynamics.conversions import keplerian_to_cartesian, sample_orbit
+from orbital_dynamics.constants import EARTH_MU, EARTH_RADIUS
 
-EARTH_MU = 398600.4418 * 1e9
-EARTH_RADIUS = 6371.0
+
+EARTH_RADIUS_KM = EARTH_RADIUS / 1000
 
 
 class OrbitVisualizer(QWidget):
@@ -39,7 +40,7 @@ class OrbitVisualizer(QWidget):
         self.spins = {}
 
         specs = [('a', 'Большая полуось, км', 7000, 6800, 30000, 10, 0),
-            ('e', 'Эксцентриситет', 0.05, 0.0, 1.00, 0.01, 2),
+            ('e', 'Эксцентриситет', 0.05, 0.0, 0.99, 0.01, 2),
             ('i', 'Наклонение, °', 30, 0, 180, 1, 0),
             ('omega', 'Аргумент перицентра, °', 45, 0, 360, 1, 0),
             ('raan', 'Долгота восх. узла, °', 60, 0, 360, 1, 0),
@@ -55,8 +56,8 @@ class OrbitVisualizer(QWidget):
             spin.setSingleStep(step)
             spin.setDecimals(decimals)
             spin.setValue(default)
-            slider.valueChanged.connect(lambda n, s=spin, scale=step: s.setValue(n * scale))
-            spin.valueChanged.connect(lambda n, s=slider, scale=step: s.setValue(round(n / scale)))
+            slider.valueChanged.connect(lambda n, s = spin, scale = step: s.setValue(n * scale))
+            spin.valueChanged.connect(lambda n, s = slider, scale = step: s.setValue(round(n / scale)))
             spin.valueChanged.connect(self.update_orbit)
             row = QVBoxLayout()
             row.addWidget(spin)
@@ -73,47 +74,86 @@ class OrbitVisualizer(QWidget):
         controls.addWidget(reset)
         controls.addStretch()
 
-        earth = pv.Sphere(radius = EARTH_RADIUS, theta_resolution = 48, phi_resolution = 48)
+        earth = pv.Sphere(radius = EARTH_RADIUS_KM, theta_resolution = 48, phi_resolution = 48)
         self.plotter.add_mesh(earth, color = '#2768ad', smooth_shading = True, name = 'earth')
         self.plotter.add_axes()
         self.update_orbit()
         self.plotter.view_isometric()
         self.plotter.reset_camera()
 
-    def elements(self, nu=None):
+    def elements(self, nu = None):
         p = self.spins
         return np.array([p['a'].value() * 1000,
             p['e'].value(),
             math.radians(p['i'].value()),
             math.radians(p['omega'].value()),
             math.radians(p['raan'].value()),
-            math.radians(p['nu'].value() if nu is None else nu),], dtype=float)
+            math.radians(p['nu'].value() if nu is None else nu),], dtype = float)
 
-    def update_orbit(self, *args):
+    def draw_trajectory(self, positions_m: np.ndarray) -> None:
+
+        """Draw a trajectory from Cartesian positions in metres.
+        """
+
+        positions_m = np.asarray(positions_m, dtype = float)
+
+        if (positions_m.ndim != 2 or positions_m.shape[1] != 3 or len(positions_m) < 2
+            or not np.all(np.isfinite(positions_m))):
+            raise ValueError("Trajectory must contain at least two finite 3D positions.")
+
+        positions_km = positions_m / 1000.0
+
+        trajectory = pv.lines_from_points(positions_km, close = False)
+
+        self.plotter.add_mesh(trajectory, color = "#54d9f0", line_width = 4, name = "orbit")
+
+    def draw_satellite(self, position_m: np.ndarray) -> None:
+
+        """Draw a satellite at a Cartesian position in metres.
+        """
+
+        position_m = np.asarray(position_m, dtype = float)
+
+        if position_m.shape != (3,) or not np.all(np.isfinite(position_m)):
+            raise ValueError("Satellite position must contain three finite values.")
+
+        position_km = position_m / 1000.0
+
+        satellite = pv.Sphere(radius = 250, center = position_km)
+
+        self.plotter.add_mesh(satellite, color = "#ffc35a", name = "satellite")
+
+    def update_orbit(self, *args) -> None:
+
+        """Update the displayed Keplerian orbit.
+        """
 
         try:
-            points = []
-            for angle in np.linspace(0, 360, 181):
-                state = element_conversion.keplerian_to_cartesian(self.elements(nu=angle), EARTH_MU)
-                points.append(state[:3] / 1000)
+            elements = self.elements()
+            positions_m = sample_orbit(elements, EARTH_MU, samples = 181)
 
-            points = np.array(points)
-            self.plotter.add_mesh(pv.lines_from_points(points, close = False), color = '#54d9f0', line_width = 4, name = 'orbit')
+            state = keplerian_to_cartesian(elements, EARTH_MU)
 
-            satellite_state = element_conversion.keplerian_to_cartesian(self.elements(), EARTH_MU)
-            satellite_km = satellite_state[:3] / 1000
-            satellite = pv.Sphere(radius = 250, center = satellite_km)
-            self.plotter.add_mesh(satellite, color = '#ffc35a', name = 'satellite')
+            self.draw_trajectory(positions_m)
+            self.draw_satellite(state[:3])
 
-            a = self.spins['a'].value()
-            e = self.spins['e'].value()
-            rp, ra = a * (1 - e), a * (1 + e)
-            note = '\nВнимание: орбита проходит внутри Земли.' if rp < EARTH_RADIUS else ''
-            self.status.setText(f'Перицентр: {rp:.1f} км от центра Земли\n'f'Апоцентр: {ra:.1f} км от центра Земли'f'{note}')
+            a_km = elements[0] / 1000.0
+            e = elements[1]
+
+            periapsis_km = a_km * (1.0 - e)
+            apoapsis_km = a_km * (1.0 + e)
+
+            note = ("\nВнимание: орбита проходит внутри Земли!" if periapsis_km < EARTH_RADIUS_KM else "")
+
+            self.status.setText(
+                f"Перицентр: {periapsis_km:.1f} км от центра Земли\n"
+                f"Апоцентр: {apoapsis_km:.1f} км от центра Земли"
+                f"{note}")
+
             self.plotter.render()
 
-        except Exception as exc:
-            QMessageBox.critical(self, 'Ошибка вычисления!', str(exc))
+        except (ValueError, RuntimeError, FloatingPointError) as exc:
+            QMessageBox.critical(self, "Ошибка вычисления!", str(exc))
 
     def reset_values(self):
         defaults = {'a': 7000, 'e': 0.05, 'i': 30,'omega': 45, 'raan': 60, 'nu': 90}
@@ -121,8 +161,16 @@ class OrbitVisualizer(QWidget):
             self.spins[key].setValue(value)
 
 
-if __name__ == '__main__':
+def main() -> None:
+
+    """Launch the OrbitVisualizer application.
+    """
+
     app = QApplication(sys.argv)
     window = OrbitVisualizer()
     window.show()
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

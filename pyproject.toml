@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "orbital-dynamics"
+version = "0.1.0"
+description = "Orbital mechanics tools for orbital element conversion and visualization"
+requires-python = ">=3.11,<3.13"
+dependencies = ["numpy", "pyorb>=0.6.4", "PySide6", "pyvista", "pyvistaqt", "scipy>=1.17.1"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+ 
+[project.scripts]
+orbit-converter = "orbital_dynamics.ui.converter:main"
+orbit-visualizer = "orbital_dynamics.ui.visualizer:main"
+[tool.hatch.build.targets.wheel]
+packages = ["src/orbital_dynamics"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
